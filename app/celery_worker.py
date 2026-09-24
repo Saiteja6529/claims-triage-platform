@@ -1,5 +1,6 @@
 import time
 from celery import Celery
+from app.webhook_tool import send_human_review_alert
 from app.agents.policy_agent import verify_eligibility
 from app.agents.risk_agent import assess_risk
 from app.payment_tool import execute_stripe_refund
@@ -49,6 +50,18 @@ def process_claim_async(self, order_id: str, claim_reason: str, previous_claims_
             decision = "HUMAN_REVIEW_REQUIRED"
             status_code = "FLAGGED_FOR_AUDIT"
             payment_action = {"executed": False, "reason": "Flagged for human audit."}
+        elif risk_res["requires_human_review"]:
+            decision = "HUMAN_REVIEW_REQUIRED"
+            status_code = "FLAGGED_FOR_AUDIT"
+            
+            # AUTOMATED ALERT TOOL EXECUTION
+            alert_action = send_human_review_alert(
+                order_id=order_id,
+                customer_id=policy_res["customer_id"],
+                risk_score=risk_res["risk_score"],
+                flags=risk_res.get("flags", [])
+            )
+            payment_action = {"executed": False, "reason": "Flagged for human audit.", "alert_sent": alert_action}
         else:
             decision = "AUTOMATED_REFUND_APPROVED"
             status_code = "APPROVED"
