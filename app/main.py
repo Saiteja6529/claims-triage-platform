@@ -1,8 +1,10 @@
 import asyncio
 import json
+import secrets
+import hashlib
 from dotenv import load_dotenv
 
-# Load environment variables from .env file first
+# 1. Load environment variables first
 load_dotenv()
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, File, UploadFile, Form
@@ -12,17 +14,19 @@ from sqlalchemy.orm import Session
 
 from app.celery_worker import process_claim_async
 from app.db import get_db, engine, Base
-from app.models import ClaimRecord
+from app.models import ClaimRecord, Tenant, TenantApiKey
 from app.payment_tool import execute_stripe_refund
 from app.ocr_tool import inspect_receipt_image
+from app.auth import get_current_tenant
+from app.agents.policy_agent import ingest_tenant_policy
 
-# 1. Initialize FastAPI Application Instance FIRST
+# 2. INITIALIZE FASTAPI APP INSTANCE FIRST (Fixes NameError)
 app = FastAPI(
     title="Enterprise Claims Triage Platform - Production Engine",
     description="Real-time multi-agent claims automation platform with WebSockets, RAG, Vision AI, and Human-in-the-Loop audit controls."
 )
 
-# 2. Initialize Database Tables
+# 3. INITIALIZE DATABASE TABLES
 Base.metadata.create_all(bind=engine)
 
 class ClaimRequest(BaseModel):
@@ -34,7 +38,41 @@ class ClaimRequest(BaseModel):
 def health_check():
     return {"status": "healthy", "mode": "production"}
 
-# 3. Asynchronous Dispatch Endpoint (JSON Payload)
+# 4. TENANT MANAGEMENT & MULTI-TENANT ENDPOINTS
+@app.post("/api/v2/admin/tenants/register")
+def register_tenant(tenant_name: str, db: Session = Depends(get_db)):
+    raw_api_key = f"sk_live_{secrets.token_hex(16)}"
+    hashed_key = hashlib.sha256(raw_api_key.encode()).hexdigest()
+
+    new_tenant = Tenant(name=tenant_name)
+    db.add(new_tenant)
+    db.commit()
+    db.refresh(new_tenant)
+
+    key_record = TenantApiKey(tenant_id=new_tenant.id, hashed_key=hashed_key)
+    db.add(key_record)
+    db.commit()
+
+    return {
+        "tenant_id": new_tenant.id,
+        "tenant_name": new_tenant.name,
+        "api_key": raw_api_key,
+        "warning": "Store this API key securely. It will not be shown again."
+    }
+
+@app.post("/api/v2/tenants/policies/upload")
+def upload_merchant_policy(
+    policy_rules: list[str],
+    current_tenant: Tenant = Depends(get_current_tenant)
+):
+    result = ingest_tenant_policy(current_tenant.id, policy_rules)
+    return {
+        "tenant_id": current_tenant.id,
+        "tenant_name": current_tenant.name,
+        "ingestion_result": result
+    }
+
+# 5. ASYNC TRIAGE & VISION AI ENDPOINTS
 @app.post("/api/v2/triage-claim-async")
 def triage_claim_async(claim: ClaimRequest):
     task = process_claim_async.delay(
@@ -48,7 +86,6 @@ def triage_claim_async(claim: ClaimRequest):
         "status": "PROCESSING"
     }
 
-# 4. Vision AI Multipart File Upload Dispatch Endpoint
 @app.post("/api/v2/triage-claim-with-receipt")
 async def triage_claim_with_receipt(
     order_id: str = Form(...),
@@ -87,7 +124,7 @@ async def triage_claim_with_receipt(
         "vision_metadata": analysis
     }
 
-# 5. WebSockets Endpoint for Real-Time Status Streaming
+# 6. WEBSOCKETS ENDPOINT FOR REAL-TIME STREAMING
 @app.websocket("/ws/task-status/{task_id}")
 async def websocket_task_status(websocket: WebSocket, task_id: str):
     await websocket.accept()
@@ -106,12 +143,11 @@ async def websocket_task_status(websocket: WebSocket, task_id: str):
     except WebSocketDisconnect:
         pass
 
-# 6. Admin API: Query Flagged Audit Claims
+# 7. ADMIN AUDIT ENDPOINTS
 @app.get("/api/v2/admin/pending-claims")
 def get_pending_claims(db: Session = Depends(get_db)):
     return db.query(ClaimRecord).filter(ClaimRecord.status == "FLAGGED_FOR_AUDIT").all()
 
-# 7. Admin API: Manually Resolve Flagged Claim
 @app.post("/api/v2/admin/resolve-claim/{claim_id}")
 def resolve_claim(claim_id: str, action: str, db: Session = Depends(get_db)):
     claim = db.query(ClaimRecord).filter(ClaimRecord.id == claim_id).first()
@@ -137,7 +173,7 @@ def resolve_claim(claim_id: str, action: str, db: Session = Depends(get_db)):
     db.commit()
     return {"status": "SUCCESS", "claim_id": claim_id, "new_status": claim.status}
 
-# 8. User Console UI Route
+# 8. DASHBOARD & ADMIN UI ROUTES
 @app.get("/dashboard", response_class=HTMLResponse)
 async def serve_dashboard():
     return """
@@ -231,7 +267,6 @@ async def serve_dashboard():
     </html>
     """
 
-# 9. Admin Approval UI Route
 @app.get("/admin", response_class=HTMLResponse)
 async def serve_admin_console():
     return """
