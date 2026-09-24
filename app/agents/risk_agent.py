@@ -1,3 +1,6 @@
+from app.telemetry import trace_agent_execution
+
+@trace_agent_execution("fraud_risk_agent")
 def assess_risk(customer_id: str, claim_amount: float, previous_claims_count: int):
     # Fraud Risk Scoring Heuristics
     risk_score = 0.10

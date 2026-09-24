@@ -1,5 +1,9 @@
 from app.database.mock_db import get_order
 from app.rag_service import search_policy_vector
+from app.telemetry import trace_agent_execution
+
+@trace_agent_execution("policy_verification_agent")
+
 
 def verify_eligibility(order_id: str, claim_reason: str):
     order = get_order(order_id)

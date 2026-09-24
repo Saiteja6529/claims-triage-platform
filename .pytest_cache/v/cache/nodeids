@@ -1,0 +1,10 @@
+[
+  "tests/test_agents.py::test_policy_agent_expired_order",
+  "tests/test_agents.py::test_policy_agent_invalid_order",
+  "tests/test_agents.py::test_policy_agent_valid_order",
+  "tests/test_agents.py::test_rag_vector_search",
+  "tests/test_agents.py::test_risk_agent_high_risk_frequency",
+  "tests/test_agents.py::test_risk_agent_low_risk",
+  "tests/test_workflow.py::test_ocr_receipt_tool",
+  "tests/test_workflow.py::test_stripe_payment_tool"
+]
