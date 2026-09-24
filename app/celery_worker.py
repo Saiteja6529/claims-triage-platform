@@ -5,6 +5,8 @@ from app.webhook_tool import send_human_review_alert
 from app.agents.policy_agent import verify_eligibility
 from app.agents.risk_agent import assess_risk
 from app.payment_tool import execute_stripe_refund
+from app.db import SessionLocal
+from app.models import ClaimRecord
 
 celery_app = Celery(
     "claims_worker",
@@ -29,11 +31,24 @@ def process_claim_async(self, order_id: str, claim_reason: str, previous_claims_
         policy_res = verify_eligibility(order_id, claim_reason)
         
         if not policy_res["found"]:
-            return {
+            result_data = {
                 "order_id": order_id,
                 "status": "FAILED",
                 "reason": policy_res["reason"]
             }
+            # Save failed policy lookup to DB
+            _save_to_db(
+                task_id=self.request.id,
+                order_id=order_id,
+                customer_id="UNKNOWN",
+                claim_reason=claim_reason,
+                status="FAILED",
+                final_decision="NOT_FOUND",
+                risk_score=0.0,
+                is_eligible=False,
+                payment_action={"executed": False, "reason": policy_res["reason"]}
+            )
+            return result_data
         
         # Agent 2: Fraud & Risk Assessment
         risk_res = assess_risk(
@@ -74,6 +89,19 @@ def process_claim_async(self, order_id: str, claim_reason: str, previous_claims_
                 customer_id=policy_res["customer_id"]
             )
             
+        # PERSIST TO DATABASE FOR ADMIN AUDIT TRAIL
+        _save_to_db(
+            task_id=self.request.id,
+            order_id=order_id,
+            customer_id=policy_res["customer_id"],
+            claim_reason=claim_reason,
+            status=status_code,
+            final_decision=decision,
+            risk_score=risk_res["risk_score"],
+            is_eligible=policy_res["is_eligible"],
+            payment_action=payment_action
+        )
+
         return {
             "order_id": order_id,
             "customer_id": policy_res["customer_id"],
@@ -87,3 +115,27 @@ def process_claim_async(self, order_id: str, claim_reason: str, previous_claims_
         }
     except Exception as exc:
         raise self.retry(exc=exc, countdown=5)
+
+def _save_to_db(task_id: str, order_id: str, customer_id: str, claim_reason: str, 
+                status: str, final_decision: str, risk_score: float, is_eligible: bool, payment_action: dict):
+    """Helper function to log claim execution history into PostgreSQL/SQLite."""
+    db = SessionLocal()
+    try:
+        record = ClaimRecord(
+            id=task_id,
+            order_id=order_id,
+            customer_id=customer_id,
+            claim_reason=claim_reason,
+            status=status,
+            final_decision=final_decision,
+            risk_score=risk_score,
+            is_eligible=is_eligible,
+            payment_action=payment_action
+        )
+        db.add(record)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"Database logging error: {e}")
+    finally:
+        db.close()

@@ -3,18 +3,34 @@ version: '3.8'
 services:
   web:
     build: .
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
-    volumes:
-      - .:/app
     environment:
-      - CELERY_BROKER_URL=sqla+sqlite:///celerydb.sqlite
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/claims_db
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+    depends_on:
+      - db
 
   worker:
     build: .
     command: celery -A app.celery_worker.celery_app worker --loglevel=info -P threads
-    volumes:
-      - .:/app
     environment:
-      - CELERY_BROKER_URL=sqla+sqlite:///celerydb.sqlite
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/claims_db
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+    depends_on:
+      - db
+
+  db:
+    image: postgres:15-alpine
+    container_name: claims_postgres
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=claims_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
