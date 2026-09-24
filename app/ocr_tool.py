@@ -1,30 +1,66 @@
-from PIL import Image
+import os
 import io
+import json
+from dotenv import load_dotenv
+from PIL import Image
+from google import genai
+from google.genai import types
 
-def parse_receipt_image(image_bytes: bytes):
+load_dotenv()
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
+def inspect_receipt_image(image_bytes: bytes) -> dict:
     """
-    Extracts structured order metadata from customer-uploaded receipt images.
+    Analyzes an uploaded receipt/damage image (JPEG/PNG) using Gemini Vision AI.
+    Extracts structured data and verifies image authenticity for potential forgery/tampering.
     """
+    if not GEMINI_API_KEY:
+        return {
+            "success": False,
+            "error": "GEMINI_API_KEY missing from environment or .env file."
+        }
+
     try:
-        # Open raw image bytes using Pillow
+        # Validate image format and integrity using Pillow
         image = Image.open(io.BytesIO(image_bytes))
-        
-        # Lightweight CPU vision mock processing
-        extracted_text = "RECEIPT #ORDER101 TOTAL: $49.99 DATE: 2026-09-19 STATUS: PAID"
-        
+        image.verify()
+        image = Image.open(io.BytesIO(image_bytes))  # Reopen after verification
+
+        client = genai.Client(api_key=GEMINI_API_KEY)
+
+        prompt = """
+        You are an automated claims auditor. Inspect this image for return/refund validation.
+        Extract key details and evaluate whether the receipt or damaged item photo shows signs of digital manipulation, Photoshop editing, or font inconsistencies.
+
+        Return ONLY a JSON object with this exact schema:
+        {
+            "is_valid_receipt": true,
+            "vendor_name": "string or null",
+            "extracted_order_id": "string or null",
+            "total_amount": 0.00,
+            "tampering_detected": false,
+            "tampering_notes": "description of edits or 'None'"
+        }
+        """
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[image, prompt],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
+        )
+
+        structured_output = json.loads(response.text)
+
         return {
             "success": True,
-            "extracted_text": extracted_text,
-            "detected_order_id": "ORDER101" if "ORDER101" in extracted_text else None,
-            "detected_amount": 49.99,
-            "image_format": image.format,
-            "image_size": f"{image.size[0]}x{image.size[1]} px"
+            "vision_analysis": structured_output
         }
+
     except Exception as e:
         return {
             "success": False,
-            "error": str(e),
-            "extracted_text": "",
-            "detected_order_id": None,
-            "detected_amount": 0.0
+            "error": f"Vision processing failed: {str(e)}"
         }

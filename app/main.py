@@ -1,6 +1,11 @@
 import asyncio
 import json
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
+from dotenv import load_dotenv
+
+# Load environment variables from .env file first
+load_dotenv()
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, File, UploadFile, Form
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -9,14 +14,16 @@ from app.celery_worker import process_claim_async
 from app.db import get_db, engine, Base
 from app.models import ClaimRecord
 from app.payment_tool import execute_stripe_refund
+from app.ocr_tool import inspect_receipt_image
 
-# Initialize database tables
-Base.metadata.create_all(bind=engine)
-
+# 1. Initialize FastAPI Application Instance FIRST
 app = FastAPI(
     title="Enterprise Claims Triage Platform - Production Engine",
-    description="Real-time multi-agent claims automation platform with WebSockets, RAG, and Human-in-the-Loop audit controls."
+    description="Real-time multi-agent claims automation platform with WebSockets, RAG, Vision AI, and Human-in-the-Loop audit controls."
 )
+
+# 2. Initialize Database Tables
+Base.metadata.create_all(bind=engine)
 
 class ClaimRequest(BaseModel):
     order_id: str
@@ -27,7 +34,7 @@ class ClaimRequest(BaseModel):
 def health_check():
     return {"status": "healthy", "mode": "production"}
 
-# 1. Asynchronous Dispatch Endpoint
+# 3. Asynchronous Dispatch Endpoint (JSON Payload)
 @app.post("/api/v2/triage-claim-async")
 def triage_claim_async(claim: ClaimRequest):
     task = process_claim_async.delay(
@@ -41,7 +48,46 @@ def triage_claim_async(claim: ClaimRequest):
         "status": "PROCESSING"
     }
 
-# 2. WebSockets Endpoint for Real-Time Status Streaming
+# 4. Vision AI Multipart File Upload Dispatch Endpoint
+@app.post("/api/v2/triage-claim-with-receipt")
+async def triage_claim_with_receipt(
+    order_id: str = Form(...),
+    claim_reason: str = Form(...),
+    previous_claims_count: int = Form(0),
+    receipt_file: UploadFile = File(...)
+):
+    image_bytes = await receipt_file.read()
+    
+    # Run Vision AI Inspection
+    vision_res = inspect_receipt_image(image_bytes)
+    if not vision_res["success"]:
+        return {"status": "FAILED", "reason": vision_res["error"]}
+        
+    analysis = vision_res["vision_analysis"]
+    
+    # Automatically Reject if Digital Forgery / Tampering is Detected
+    if analysis.get("tampering_detected"):
+        return {
+            "status": "REJECTED_AUTOMATICALLY",
+            "reason": "Receipt image forgery or manipulation detected.",
+            "tampering_notes": analysis.get("tampering_notes")
+        }
+
+    # Dispatch to Celery Background Queue
+    task = process_claim_async.delay(
+        order_id,
+        claim_reason,
+        previous_claims_count
+    )
+    
+    return {
+        "message": "Receipt verified by Vision AI. Claim task dispatched.",
+        "task_id": task.id,
+        "status": "PROCESSING",
+        "vision_metadata": analysis
+    }
+
+# 5. WebSockets Endpoint for Real-Time Status Streaming
 @app.websocket("/ws/task-status/{task_id}")
 async def websocket_task_status(websocket: WebSocket, task_id: str):
     await websocket.accept()
@@ -60,12 +106,12 @@ async def websocket_task_status(websocket: WebSocket, task_id: str):
     except WebSocketDisconnect:
         pass
 
-# 3. Admin API: Query Flagged Audit Claims
+# 6. Admin API: Query Flagged Audit Claims
 @app.get("/api/v2/admin/pending-claims")
 def get_pending_claims(db: Session = Depends(get_db)):
     return db.query(ClaimRecord).filter(ClaimRecord.status == "FLAGGED_FOR_AUDIT").all()
 
-# 4. Admin API: Manually Resolve Flagged Claim
+# 7. Admin API: Manually Resolve Flagged Claim
 @app.post("/api/v2/admin/resolve-claim/{claim_id}")
 def resolve_claim(claim_id: str, action: str, db: Session = Depends(get_db)):
     claim = db.query(ClaimRecord).filter(ClaimRecord.id == claim_id).first()
@@ -91,7 +137,7 @@ def resolve_claim(claim_id: str, action: str, db: Session = Depends(get_db)):
     db.commit()
     return {"status": "SUCCESS", "claim_id": claim_id, "new_status": claim.status}
 
-# 5. User Console UI Route
+# 8. User Console UI Route
 @app.get("/dashboard", response_class=HTMLResponse)
 async def serve_dashboard():
     return """
@@ -185,7 +231,7 @@ async def serve_dashboard():
     </html>
     """
 
-# 6. Admin Approval UI Route
+# 9. Admin Approval UI Route
 @app.get("/admin", response_class=HTMLResponse)
 async def serve_admin_console():
     return """

@@ -7,6 +7,8 @@ from app.agents.risk_agent import assess_risk
 from app.payment_tool import execute_stripe_refund
 from app.db import SessionLocal
 from app.models import ClaimRecord
+from dotenv import load_dotenv
+load_dotenv()  # Automatically loads variables from .env into os.environ
 
 celery_app = Celery(
     "claims_worker",
