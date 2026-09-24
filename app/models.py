@@ -40,3 +40,16 @@ class ClaimRecord(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     tenant = relationship("Tenant", back_populates="claims")
+
+
+
+class WebhookConfig(Base):
+    __tablename__ = "webhook_configs"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    tenant_id = Column(String, ForeignKey("tenants.id"), nullable=False)
+    target_url = Column(String, nullable=False)
+    secret_token = Column(String, nullable=False)
+    is_active = Column(Boolean, default=True)
+
+    tenant = relationship("Tenant")
