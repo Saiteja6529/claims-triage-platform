@@ -1,0 +1,13 @@
+Set-Content -Path requirements.txt -Value @"
+fastapi>=0.110.0
+uvicorn>=0.28.0
+pydantic>=2.6.0
+celery>=5.3.0
+sqlalchemy>=2.0.0
+qdrant-client>=1.8.0
+stripe>=8.0.0
+pillow>=10.2.0
+pytesseract>=0.3.10
+requests>=2.31.0
+boto3>=1.34.0
+"@

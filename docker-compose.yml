@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    environment:
+      - CELERY_BROKER_URL=sqla+sqlite:///celerydb.sqlite
+
+  worker:
+    build: .
+    command: celery -A app.celery_worker.celery_app worker --loglevel=info -P threads
+    volumes:
+      - .:/app
+    environment:
+      - CELERY_BROKER_URL=sqla+sqlite:///celerydb.sqlite
