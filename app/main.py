@@ -20,11 +20,12 @@ from app.ocr_tool import inspect_receipt_image
 from app.auth import get_current_tenant
 from app.agents.policy_agent import ingest_tenant_policy
 from app.webhook_engine import dispatch_outbound_webhook
+from app.vision_engine import extract_exif_metadata, assess_physical_damage
 
 # 2. INITIALIZE FASTAPI INSTANCE FIRST
 app = FastAPI(
     title="Enterprise Claims Triage Platform - Production Engine",
-    description="Multi-tenant claims triage SaaS API with WebSockets, RAG, Vision AI, and Webhook notifications."
+    description="Multi-tenant claims triage SaaS API with WebSockets, RAG, Vision AI, EXIF inspection, and Webhook notifications."
 )
 
 # 3. INITIALIZE DATABASE TABLES
@@ -39,7 +40,7 @@ class ClaimRequest(BaseModel):
 def health_check():
     return {"status": "healthy", "mode": "production"}
 
-# 4. TENANT MANAGEMENT & MULTI-TENANT ROUTE
+# 4. TENANT MANAGEMENT & MULTI-TENANT ROUTES
 @app.post("/api/v2/admin/tenants/register")
 def register_tenant(tenant_name: str, db: Session = Depends(get_db)):
     raw_api_key = f"sk_live_{secrets.token_hex(16)}"
@@ -96,7 +97,49 @@ def configure_webhook(
         "note": "Use the signing secret to verify incoming 'X-Claims-Signature' headers on your server."
     }
 
-# 5. ASYNC TRIAGE & VISION ENDPOINTS
+# 5. STEP 3: DAMAGE PHOTO & EXIF TRIAGE ENDPOINT
+@app.post("/api/v2/triage-claim-with-damage-photo")
+async def triage_claim_with_damage_photo(
+    order_id: str = Form(...),
+    claim_reason: str = Form(...),
+    previous_claims_count: int = Form(0),
+    damage_photo: UploadFile = File(...),
+    current_tenant: Tenant = Depends(get_current_tenant)
+):
+    image_bytes = await damage_photo.read()
+
+    exif_meta = extract_exif_metadata(image_bytes)
+
+    damage_res = assess_physical_damage(image_bytes, claim_reason)
+    if not damage_res["success"]:
+        raise HTTPException(status_code=400, detail=f"Damage analysis failed: {damage_res['error']}")
+
+    analysis = damage_res["damage_analysis"]
+
+    if not analysis.get("matches_claim_reason"):
+        return {
+            "status": "REJECTED_AUTOMATICALLY",
+            "reason": "Uploaded image does not match claimed damage reason.",
+            "exif_metadata": exif_meta,
+            "vision_analysis": analysis
+        }
+
+    task = process_claim_async.delay(
+        order_id=order_id,
+        claim_reason=claim_reason,
+        previous_claims_count=previous_claims_count,
+        tenant_id=current_tenant.id
+    )
+
+    return {
+        "message": "Damage photo verified and claim dispatched.",
+        "task_id": task.id,
+        "tenant_id": current_tenant.id,
+        "exif_metadata": exif_meta,
+        "vision_analysis": analysis
+    }
+
+# 6. ASYNC TRIAGE & VISION RECEIPT ENDPOINTS
 @app.post("/api/v2/triage-claim-async")
 def triage_claim_async(claim: ClaimRequest):
     task = process_claim_async.delay(
@@ -145,7 +188,7 @@ async def triage_claim_with_receipt(
         "vision_metadata": analysis
     }
 
-# 6. WEBSOCKETS & ADMIN ROUTES
+# 7. WEBSOCKETS & ADMIN ROUTES
 @app.websocket("/ws/task-status/{task_id}")
 async def websocket_task_status(websocket: WebSocket, task_id: str):
     await websocket.accept()
@@ -201,7 +244,7 @@ def resolve_claim(claim_id: str, action: str, db: Session = Depends(get_db)):
 
     return {"status": "SUCCESS", "claim_id": claim_id, "new_status": claim.status}
 
-# 7. CONSOLE DASHBOARDS
+# 8. CONSOLE DASHBOARDS
 @app.get("/dashboard", response_class=HTMLResponse)
 async def serve_dashboard():
     return "<html><body><h1>Enterprise Claims Console Active</h1></body></html>"
